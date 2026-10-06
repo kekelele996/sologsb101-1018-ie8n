@@ -69,7 +69,7 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | --- | --- | --- | --- |
 | `/bodies` | 胎体与器型台账 | 新建胎体、按材质与器型筛选（同步 URL query），卡片回显已完成道次与最近荫房记录 | Body、Coat、Room |
 | `/coats` | 髹涂道次编排 | 拖拽调整道次先后并重编号、批量改漆种与状态、同器型自动带出上次漆种与间隔建议 | Coat、Body |
-| `/rooms` | 荫房温湿度记录 | 按区间判定适宜 / 偏干 / 偏湿，越界回写关联道次为「待复检」，支持日期区间筛选 | Room、Coat |
+| `/rooms` | 荫房温湿度记录 | 按区间判定适宜 / 偏干 / 偏湿；越界挂起未完成道次、适宜按登记先后松绑，记录挂起/松绑来源与记录人，支持日期区间筛选 | Room、Coat |
 | `/polish` | 打磨与推光工序 | 按道次生成目数序列（320→2000），未打磨完的道次禁止进入下一道罩漆 | Polish、Coat |
 | `/inlays` | 镶嵌纹饰登记 | 螺钿 / 蛋壳 / 描金 / 戗金登记与批量调整分类，器型示意区叠加显示 | Inlay、Body |
 | `/export` | 成品质检与导出 | 质检登记（返工定位到具体道次与荫房记录）、返工清单、JSON 导入导出与清空重播种 | Inspect 及全部模型 |
@@ -83,13 +83,21 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | 模型 | 文件 | 关键字段 | 说明 |
 | --- | --- | --- | --- |
 | Body 胎体 | `src/types/body.ts` | `id` `code` `material`（木/脱胎/金属） `shape`（碗/盘/盒/瓶） `sizeMm` `ownerName` `state`（待髹涂/髹涂中/待荫干/已完成） | 新建后进入道次编排，卡片回显进度与最近荫房 |
-| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `needRecheck` | 拖拽调序，同器型带出上次漆种与间隔建议 |
-| Room 荫房记录 | `src/types/room.ts` | `id` `bodyId` `date` `tempC` `humidityPct` `inAt` `outAt` `verdict`（适宜/偏干/偏湿） | 越界即回写关联道次为待复检 |
+| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `needRecheck` `suspendedByRoomId` `releasedByRoomId` | 拖拽调序，同器型带出上次漆种与间隔建议；待复检由荫房记录挂起/松绑 |
+| Room 荫房记录 | `src/types/room.ts` | `id` `bodyId` `date` `tempC` `humidityPct` `inAt` `outAt` `verdict`（适宜/偏干/偏湿） `operator`（记录人） | 越界记录挂起未完成道次、适宜记录松绑，挂起/松绑均记录来源记录与记录人 |
+
+挂起 / 松绑规则（待复检可回溯）：
+
+- **挂起**：偏干 / 偏湿的越界记录把该胎体「没完成的道次」挂为待复检，并在道次上记下挂起它的记录（`suspendedByRoomId`，谁挂的）。
+- **松绑**：之后登记的适宜记录把挂着的道次松绑，并记下松绑它的记录（`releasedByRoomId`，谁松的）。
+- **配法**：按登记先后**一条对一条**——每条越界记录各自排一个待松绑队列，每条适宜记录取登记最早、仍挂着道次的越界记录，松开其队首一道；该越界挂了多道时，其余道次继续等后头的下一条适宜记录。同日与跨夜都只按登记时刻（`createdAt`）排序。
+- **撤销 / 编辑**：撤销（删除）或编辑荫房记录后，按全部档案整体重算，被撤销记录挂起且无后续记录接手的道次回到没被它动过的样子。
+- 道次推进到「已完成」自动放下标记；挂起 / 松绑结果在道次页、荫房页与台账 CSV 中都可回溯到具体记录与记录人。
 | Polish 打磨推光 | `src/types/polish.ts` | `id` `bodyId` `seq` `grit` `method`（水砂/推光/揩清） `durationMin` `operator` | 按道次生成目数序列 |
 | Inlay 镶嵌 | `src/types/inlay.ts` | `id` `bodyId` `type`（螺钿/蛋壳/描金/戗金） `pattern` `position` `materialNote` | 器型示意区叠加显示，支持批量改分类 |
 | Inspect 质检 | `src/types/inspect.ts` | `id` `bodyId` `verdict`（合格/返工） `defectNote` `inspector` `date` `defectCoatSeq` `defectRoomId` | 返工定位到道次与荫房记录并生成返工清单 |
 
-数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`coats` 表增加 `paintType` 索引，并在 Dexie `.upgrade()` 中为历史记录回填 `paintType = 'raw'`、`needRecheck = false`、`thicknessUm = 40`。
+数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`。v1→v2 为 `coats` 表增加 `paintType` 索引并回填 `paintType = 'raw'`、`needRecheck = false`、`thicknessUm = 40`；v2→v3 为待复检挂起/松绑溯源模型，`coats` 增加 `suspendedByRoomId` / `releasedByRoomId`、`rooms` 增加 `operator`，并在 `.upgrade()` 中按现有荫房档案重新对账历史待复检标记（算法见 `src/utils/recheck.ts`）。
 
 ---
 
@@ -105,7 +113,7 @@ sologsb101-1018/
 │   │   ├── hooks/                # useCoatProgress.ts useIdbTable.ts
 │   │   ├── pages/                # BodyList.tsx CoatBoard.tsx RoomLog.tsx PolishBoard.tsx InlayBoard.tsx ExportView.tsx
 │   │   ├── router/               # index.tsx
-│   │   ├── utils/                # humidity.ts db.ts export.ts
+│   │   ├── utils/                # humidity.ts db.ts export.ts recheck.ts recheckSync.ts
 │   │   ├── styles/               # main.css
 │   │   ├── App.tsx main.tsx
 │   ├── public/favicon.svg

@@ -61,6 +61,7 @@ import {
   type LacquerSnapshot,
 } from '@/utils/db';
 import { buildReworkList, copyText, exportLedgerCsv, exportReworkList, exportSnapshotJson } from '@/utils/export';
+import { reconcileRecheck } from '@/utils/recheckSync';
 
 export default function ExportView() {
   const { message, modal } = AntdApp.useApp();
@@ -176,6 +177,8 @@ export default function ExportView() {
       cancelText: '取消',
       onOk: async () => {
         await importSnapshot(parsed as LacquerSnapshot);
+        // 备份（可能来自旧版本）不经过版本迁移，导入后按档案重对账一次
+        await reconcileRecheck();
         await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
         message.success('导入完成，数据已覆盖');
       },

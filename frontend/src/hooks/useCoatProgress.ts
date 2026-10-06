@@ -51,7 +51,7 @@ export function useCoatProgress(): CoatProgressResult {
         .sort((a, b) => a.seq - b.seq);
       const bodyRooms = rooms
         .filter((room) => room.bodyId === body.id)
-        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
       const done = bodyCoats.filter((coat) => coat.state === 'done').length;
       const current = bodyCoats.find((coat) => coat.state !== 'done');
       const lastRoom = bodyRooms[bodyRooms.length - 1];

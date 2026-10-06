@@ -1,7 +1,7 @@
 /**
  * /rooms 荫房温湿度记录
- * 按区间判定适宜度并回写关联道次为「待复检」，支持日期区间与判定筛选（同步 URL query）。
- * 消费 Room、Coat；复用 <FilterBar>、<StatBadge>、<EmptyPanel>。
+ * 按区间判定适宜度；越界记录挂起未完成道次、适宜记录按登记先后松绑，并记录挂起 / 松绑来源与记录人。
+ * 支持日期区间与判定筛选（同步 URL query）。消费 Room、Coat；复用 <FilterBar>、<StatBadge>、<EmptyPanel>。
  */
 import { useMemo, useState } from 'react';
 import {
@@ -17,10 +17,11 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import EmptyPanel from '@/components/common/EmptyPanel';
 import FilterBar, { useFilterQuery, type FilterSelectConfig } from '@/components/common/FilterBar';
 import StatBadge from '@/components/common/StatBadge';
@@ -54,7 +55,6 @@ export default function RoomLog() {
   const createRoom = useRoomStore((state) => state.createRoom);
   const updateRoom = useRoomStore((state) => state.updateRoom);
   const removeRoom = useRoomStore((state) => state.removeRoom);
-  const markRecheck = useCoatStore((state) => state.markRecheck);
   const coats = useCoatStore((state) => state.coats);
 
   const url = useFilterQuery(FILTER_KEYS);
@@ -66,6 +66,32 @@ export default function RoomLog() {
   const [draftHumidity, setDraftHumidity] = useState(75);
 
   const bodyCode = (bodyId: string): string => bodies.find((body) => body.id === bodyId)?.code ?? bodyId;
+
+  /** 挂起 / 松绑溯源：该条记录动过哪些道次 */
+  const suspendedSeqsByRoom = useMemo(() => {
+    const map = new Map<string, number[]>();
+    coats.forEach((coat) => {
+      if (coat.suspendedByRoomId) {
+        const list = map.get(coat.suspendedByRoomId) ?? [];
+        list.push(coat.seq);
+        map.set(coat.suspendedByRoomId, list);
+      }
+    });
+    return map;
+  }, [coats]);
+  const releasedSeqsByRoom = useMemo(() => {
+    const map = new Map<string, number[]>();
+    coats.forEach((coat) => {
+      if (coat.releasedByRoomId) {
+        const list = map.get(coat.releasedByRoomId) ?? [];
+        list.push(coat.seq);
+        map.set(coat.releasedByRoomId, list);
+      }
+    });
+    return map;
+  }, [coats]);
+  const seqText = (seqs: number[] | undefined): string =>
+    seqs && seqs.length > 0 ? `第 ${[...seqs].sort((a, b) => a - b).join('、')} 道` : '';
 
   const filtered = useMemo(() => {
     const keyword = url.keyword.trim();
@@ -126,14 +152,27 @@ export default function RoomLog() {
     const values = await form.validateFields();
     const verdict = judgeVerdict(values.tempC, values.humidityPct);
     if (editing) {
-      await updateRoom(editing.id, values);
-      message.success(`已更新 ${values.date} 的荫房记录（判定：${ROOM_VERDICT_LABEL[verdict]}）`);
+      const result = await updateRoom(editing.id, values);
+      if (result) {
+        const { sync } = result;
+        message.success(
+          `已更新 ${values.date} 的荫房记录（判定：${ROOM_VERDICT_LABEL[verdict]}）` +
+            (sync.newlySuspendedCoatIds.length > 0 ? `，挂起 ${sync.newlySuspendedCoatIds.length} 道` : '') +
+            (sync.newlyReleasedCoatIds.length > 0 ? `，松绑 ${sync.newlyReleasedCoatIds.length} 道` : ''),
+        );
+      }
     } else {
-      await createRoom(values);
+      const { sync } = await createRoom(values);
       if (verdict === 'suitable') {
-        message.success('已记录荫房温湿度，环境适宜');
+        message.success(
+          sync.newlyReleasedCoatIds.length > 0
+            ? `已记录适宜环境，按登记先后松绑 ${sync.newlyReleasedCoatIds.length} 道`
+            : '已记录荫房温湿度，环境适宜（当前没有挂着的道次）',
+        );
       } else {
-        message.warning(`判定为${ROOM_VERDICT_LABEL[verdict]}，已回写关联道次为待复检`);
+        message.warning(
+          `判定为${ROOM_VERDICT_LABEL[verdict]}，已挂起 ${sync.newlySuspendedCoatIds.length} 道未完成道次待复检`,
+        );
       }
     }
     setOpen(false);
@@ -173,6 +212,38 @@ export default function RoomLog() {
       ),
     },
     {
+      title: '记录人',
+      dataIndex: 'operator',
+      width: 90,
+      render: (value: string) => value || <Typography.Text type="secondary">未填写</Typography.Text>,
+    },
+    {
+      title: '挂起 / 松绑道次',
+      key: 'recheckTrace',
+      width: 200,
+      render: (_value, record) => {
+        const suspended = seqText(suspendedSeqsByRoom.get(record.id));
+        const released = seqText(releasedSeqsByRoom.get(record.id));
+        if (!suspended && !released) {
+          return <Typography.Text type="secondary" style={{ fontSize: 12 }}>未关联道次动作</Typography.Text>;
+        }
+        return (
+          <Space direction="vertical" size={0}>
+            {suspended ? (
+              <Tooltip title={`${record.operator || '未填写记录人'} 登记该${ROOM_VERDICT_LABEL[record.verdict]}记录时挂起`}>
+                <Tag color="warning" style={{ marginInlineEnd: 0 }}>挂起 {suspended}</Tag>
+              </Tooltip>
+            ) : null}
+            {released ? (
+              <Tooltip title={`${record.operator || '未填写记录人'} 登记该适宜记录时松绑`}>
+                <Tag color={ROOM_VERDICT_COLOR.suitable} style={{ marginInlineEnd: 0 }}>松绑 {released}</Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
       title: '荫干建议',
       key: 'advice',
       render: (_value, record) => (
@@ -185,32 +256,31 @@ export default function RoomLog() {
     {
       title: '操作',
       key: 'action',
-      width: 230,
+      width: 170,
       render: (_value, record) => (
         <Space size={4} wrap>
-          <Button
-            size="small"
-            type="link"
-            icon={<ReloadOutlined />}
-            onClick={() =>
-              void markRecheck(record.bodyId, record.verdict !== 'suitable').then(() =>
-                message.success(record.verdict === 'suitable' ? '已清除该胎体待复检标记' : '已回写待复检'),
-              )
-            }
-          >
-            回写道次
-          </Button>
           <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
             编辑
           </Button>
           <Popconfirm
-            title="删除该荫房记录"
-            okText="确认"
+            title="撤销该荫房记录"
+            description="被它挂起（且后续无记录接手）的道次会回到没被它动过的样子。"
+            okText="确认撤销"
             cancelText="取消"
-            onConfirm={() => void removeRoom(record.id).then(() => message.success('已删除'))}
+            onConfirm={() =>
+              void removeRoom(record.id).then((sync) =>
+                message.success(
+                  `已撤销该记录${
+                    sync.newlyReleasedCoatIds.length > 0 || sync.newlySuspendedCoatIds.length > 0
+                      ? `，挂起状态已按档案重算（放下 ${sync.newlyReleasedCoatIds.length} 道、挂起 ${sync.newlySuspendedCoatIds.length} 道）`
+                      : ''
+                  }`,
+                ),
+              )
+            }
           >
             <Button size="small" type="link" danger icon={<DeleteOutlined />}>
-              删除
+              撤销
             </Button>
           </Popconfirm>
         </Space>
@@ -225,7 +295,10 @@ export default function RoomLog() {
       <div className="gb-page-head">
         <div>
           <h2>荫房温湿度记录</h2>
-          <p>{rangeHint()}；越界判定会回写关联道次为「待复检」，作为漆层缺陷回溯依据。</p>
+          <p>
+            {rangeHint()}；越界记录按登记先后挂起该胎体未完成道次并记录挂起人，后续适宜记录一条对一条松绑并记录松绑人，
+            撤销记录时道次回到没被它动过的样子。
+          </p>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
           新增记录
@@ -280,7 +353,7 @@ export default function RoomLog() {
             title={rooms.length === 0 ? '还没有荫房记录' : '当前条件下没有记录'}
             description={
               rooms.length === 0
-                ? '每次入荫房时登记温度、湿度与出入房时间，判定结果会自动回写道次。'
+                ? '每次入荫房时登记温度、湿度、出入房时间与记录人；越界会挂起道次，转好再登记适宜记录即松绑。'
                 : '试着调整判定或日期区间。'
             }
             actionText="新增记录"
@@ -338,6 +411,9 @@ export default function RoomLog() {
               <InputNumber min={10} max={100} style={{ width: '100%' }} />
             </Form.Item>
           </Space>
+          <Form.Item name="operator" label="记录人">
+            <Input placeholder="如：王丽（挂起 / 松绑溯源用）" />
+          </Form.Item>
           <Space direction="vertical" size={2}>
             <Tag color={ROOM_VERDICT_COLOR[previewVerdict]}>实时判定：{ROOM_VERDICT_LABEL[previewVerdict]}</Tag>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>

@@ -36,6 +36,7 @@ import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useRoomStore } from '@/stores/roomStore';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
@@ -49,6 +50,7 @@ import {
   type PaintType,
 } from '@/types/coat';
 import { BODY_SHAPE_LABEL } from '@/types/body';
+import { ROOM_VERDICT_COLOR, ROOM_VERDICT_LABEL } from '@/types/room';
 import { suggestIntervalHours } from '@/utils/humidity';
 
 const FILTER_KEYS = ['paintType', 'state'] as const;
@@ -74,6 +76,7 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const rooms = useRoomStore((state) => state.rooms);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -97,6 +100,34 @@ export default function CoatBoard() {
     () => coats.filter((coat) => coat.bodyId === bodyId).sort((a, b) => a.seq - b.seq),
     [coats, bodyId],
   );
+
+  const roomById = useMemo(() => new Map(rooms.map((room) => [room.id, room])), [rooms]);
+
+  /** 挂起 / 松绑溯源文案：能回溯到具体荫房记录与记录人 */
+  const renderRecheckTrace = (coat: Coat) => {
+    if (!coat.needRecheck && !coat.suspendedByRoomId) {
+      return <Typography.Text type="secondary" style={{ fontSize: 12 }}>—</Typography.Text>;
+    }
+    const suspended = coat.suspendedByRoomId ? roomById.get(coat.suspendedByRoomId) : undefined;
+    const released = coat.releasedByRoomId ? roomById.get(coat.releasedByRoomId) : undefined;
+    const traceText = (room: typeof suspended): string =>
+      room ? `${room.date} ${ROOM_VERDICT_LABEL[room.verdict]}${room.operator ? ` · ${room.operator}` : ''}` : '记录已撤销';
+    return (
+      <Space direction="vertical" size={0}>
+        {coat.needRecheck ? (
+          <Tooltip title={`由该越界记录挂起${suspended?.operator ? `（${suspended.operator}）` : ''}`}>
+            <Tag color="warning" style={{ marginInlineEnd: 0 }}>挂起 · {traceText(suspended)}</Tag>
+          </Tooltip>
+        ) : (
+          <Tooltip title={`挂起：${traceText(suspended)}；松绑：${traceText(released)}`}>
+            <Tag color={released ? ROOM_VERDICT_COLOR.suitable : 'default'} style={{ marginInlineEnd: 0 }}>
+              {released ? `已松绑 · ${traceText(released)}` : `曾挂起 · ${traceText(suspended)}`}
+            </Tag>
+          </Tooltip>
+        )}
+      </Space>
+    );
+  };
 
   const filtered = useMemo(() => {
     const keyword = url.keyword.trim();
@@ -139,20 +170,22 @@ export default function CoatBoard() {
       coatDate: coat.coatDate,
       thicknessUm: coat.thicknessUm,
       state: coat.state,
-      needRecheck: coat.needRecheck,
     });
     setOpen(true);
   };
 
   const submit = async (): Promise<void> => {
-    const values = await form.validateFields();
-    const payload: CoatDraft = { ...values };
+    const values = (await form.validateFields()) as Pick<
+      CoatDraft,
+      'seq' | 'paintType' | 'colorName' | 'coatDate' | 'thicknessUm' | 'state'
+    >;
+    // needRecheck 及挂起 / 松绑来源由荫房记录对账得出，不在表单里手工改
     if (editing) {
-      await updateCoat(editing.id, payload);
-      message.success(`已更新第 ${payload.seq} 道工序`);
+      await updateCoat(editing.id, values);
+      message.success(`已更新第 ${values.seq} 道工序`);
     } else {
-      await createCoat(payload);
-      message.success(`已新增第 ${payload.seq} 道工序`);
+      await createCoat({ ...createEmptyCoatDraft(bodyId, values.seq), ...values });
+      message.success(`已新增第 ${values.seq} 道工序`);
     }
     setOpen(false);
   };
@@ -217,6 +250,12 @@ export default function CoatBoard() {
       render: (seq: number, record) => (
         <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
       ),
+    },
+    {
+      title: '复检挂起 / 松绑',
+      key: 'recheckTrace',
+      width: 210,
+      render: (_value, record) => renderRecheckTrace(record),
     },
     { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
     { title: '色名', dataIndex: 'colorName', width: 120 },
@@ -443,14 +482,13 @@ export default function CoatBoard() {
               <Select options={[...COAT_STATE_OPTIONS]} />
             </Form.Item>
           </Space>
-          <Form.Item name="needRecheck" label="待复检">
-            <Select
-              options={[
-                { value: false, label: '正常' },
-                { value: true, label: '待复检（荫房异常）' },
-              ]}
-            />
-          </Form.Item>
+          <Alert
+            type="info"
+            showIcon
+            message="待复检由荫房记录自动挂起 / 松绑"
+            description="偏干 / 偏湿记录会挂起未完成道次并记录挂起人；后续登记适宜记录按登记先后一条对一条松绑，并记录松绑人。"
+            style={{ marginBottom: 12 }}
+          />
           <Alert
             type="warning"
             showIcon

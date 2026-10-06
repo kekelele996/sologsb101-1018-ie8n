@@ -25,8 +25,12 @@ export interface Coat {
   thicknessUm: number;
   /** 当前状态 */
   state: CoatState;
-  /** 荫房判定异常时回写的「待复检」标记 */
+  /** 荫房判定异常时回写的「待复检」标记；挂起时为 true，被后续适宜记录松绑后回到 false */
   needRecheck: boolean;
+  /** 挂起该道次的越界荫房记录 id（谁挂的）；未被挂起时为 null */
+  suspendedByRoomId: string | null;
+  /** 松绑该道次的适宜荫房记录 id（谁松的）；尚未松绑时为 null */
+  releasedByRoomId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -91,5 +95,7 @@ export function createEmptyCoatDraft(bodyId: string, seq: number): CoatDraft {
     thicknessUm: 40,
     state: 'todo',
     needRecheck: false,
+    suspendedByRoomId: null,
+    releasedByRoomId: null,
   };
 }

@@ -1,12 +1,19 @@
 /**
  * 荫房记录状态管理（Zustand）
- * 维护荫房记录与超标派生统计；湿度越界即回写关联道次为「待复检」。
+ * 维护荫房记录与超标派生统计；越界记录挂起关联道次、适宜记录松绑，
+ * 挂起 / 松绑均按登记先后对账落库并记录来源（谁挂的 / 谁松的）。
  */
 import { create } from 'zustand';
 import { db, createId } from '@/utils/db';
 import type { Room, RoomDraft, RoomVerdict } from '@/types/room';
 import { judgeVerdict } from '@/utils/humidity';
+import { reconcileRecheck, type RecheckSyncResult } from '@/utils/recheckSync';
 import { useCoatStore } from './coatStore';
+
+export interface RoomChangeResult {
+  room: Room;
+  sync: RecheckSyncResult;
+}
 
 interface RoomStoreState {
   rooms: Room[];
@@ -15,9 +22,9 @@ interface RoomStoreState {
   error: string;
   loadRooms: () => Promise<void>;
   roomsOfBody: (bodyId: string) => Room[];
-  createRoom: (draft: RoomDraft) => Promise<Room>;
-  updateRoom: (id: string, patch: Partial<Room>) => Promise<void>;
-  removeRoom: (id: string) => Promise<void>;
+  createRoom: (draft: RoomDraft) => Promise<RoomChangeResult>;
+  updateRoom: (id: string, patch: Partial<Room>) => Promise<RoomChangeResult | null>;
+  removeRoom: (id: string) => Promise<RecheckSyncResult>;
   /** 超标（偏干 / 偏湿）记录条数 */
   overCount: () => number;
   overCountOfBody: (bodyId: string) => number;
@@ -34,7 +41,7 @@ export const useRoomStore = create<RoomStoreState>((set, get) => ({
     set({ loading: true });
     try {
       const rooms = await db.rooms.toArray();
-      rooms.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+      rooms.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
       set({ rooms, loading: false, ready: true, error: '' });
     } catch (error) {
       set({ loading: false, ready: true, error: error instanceof Error ? error.message : '荫房记录读取失败' });
@@ -44,7 +51,7 @@ export const useRoomStore = create<RoomStoreState>((set, get) => ({
   roomsOfBody(bodyId) {
     return get()
       .rooms.filter((room) => room.bodyId === bodyId)
-      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+      .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
   },
 
   async createRoom(draft) {
@@ -52,30 +59,39 @@ export const useRoomStore = create<RoomStoreState>((set, get) => ({
     const verdict = judgeVerdict(draft.tempC, draft.humidityPct);
     const row: Room = { ...draft, verdict, id: createId('room'), createdAt: now, updatedAt: now };
     await db.rooms.put(row);
-    // 越界即回写关联道次为待复检
-    if (verdict !== 'suitable') {
-      await useCoatStore.getState().markRecheck(row.bodyId, true);
-    }
-    await get().loadRooms();
-    return row;
+    // 依据登记先后对账：越界挂起、适宜松绑，并记录来源
+    const sync = await reconcileRecheck();
+    await Promise.all([get().loadRooms(), useCoatStore.getState().loadCoats()]);
+    return { room: row, sync };
   },
 
   async updateRoom(id, patch) {
     const existing = get().rooms.find((room) => room.id === id);
-    if (!existing) return;
+    if (!existing) return null;
     const tempC = patch.tempC ?? existing.tempC;
     const humidityPct = patch.humidityPct ?? existing.humidityPct;
     const verdict = judgeVerdict(tempC, humidityPct);
-    await db.rooms.update(id, { ...patch, tempC, humidityPct, verdict, updatedAt: Date.now() } as never);
-    if (verdict !== 'suitable') {
-      await useCoatStore.getState().markRecheck(existing.bodyId, true);
-    }
-    await get().loadRooms();
+    const next: Room = {
+      ...existing,
+      ...patch,
+      tempC,
+      humidityPct,
+      verdict,
+      updatedAt: Date.now(),
+    };
+    await db.rooms.put(next);
+    // 编辑（含改判定 / 改登记时间）后整体重算，挂起来源随之迁移
+    const sync = await reconcileRecheck();
+    await Promise.all([get().loadRooms(), useCoatStore.getState().loadCoats()]);
+    return { room: next, sync };
   },
 
   async removeRoom(id) {
+    // 撤销：删掉该记录后重算，被它挂起（且后续无记录接手）的道次回到没被它动过的样子
     await db.rooms.delete(id);
-    await get().loadRooms();
+    const sync = await reconcileRecheck();
+    await Promise.all([get().loadRooms(), useCoatStore.getState().loadCoats()]);
+    return sync;
   },
 
   overCount() {

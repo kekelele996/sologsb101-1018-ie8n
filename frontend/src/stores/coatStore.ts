@@ -7,6 +7,7 @@ import { db, createId } from '@/utils/db';
 import type { Coat, CoatDraft, CoatState, PaintType } from '@/types/coat';
 import { nextCoatState } from '@/types/coat';
 import { suggestIntervalHours, suggestPaintType } from '@/utils/humidity';
+import { reconcileRecheck } from '@/utils/recheckSync';
 import { useBodyStore } from './bodyStore';
 
 export interface PaintSuggestion {
@@ -28,7 +29,6 @@ interface CoatStoreState {
   removeCoat: (id: string) => Promise<void>;
   batchUpdate: (ids: string[], patch: Partial<Coat>) => Promise<void>;
   advanceState: (id: string) => Promise<void>;
-  markRecheck: (bodyId: string, recheck: boolean) => Promise<void>;
   reorderCoats: (bodyId: string, orderedIds: string[]) => Promise<void>;
   nextSeq: (bodyId: string) => number;
   /** 同器型自动带出上次漆种与间隔建议 */
@@ -60,7 +60,15 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
 
   async createCoat(draft) {
     const now = Date.now();
-    const row: Coat = { ...draft, id: createId('coat'), createdAt: now, updatedAt: now };
+    const row: Coat = {
+      ...draft,
+      id: createId('coat'),
+      createdAt: now,
+      updatedAt: now,
+      needRecheck: draft.needRecheck ?? false,
+      suspendedByRoomId: draft.suspendedByRoomId ?? null,
+      releasedByRoomId: draft.releasedByRoomId ?? null,
+    };
     await db.coats.put(row);
     await get().loadCoats();
     return row;
@@ -68,6 +76,8 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
 
   async updateCoat(id, patch) {
     await db.coats.update(id, { ...patch, updatedAt: Date.now() } as never);
+    // 状态等变化会影响挂起（如推进到已完成则放下），按档案重新对账
+    await reconcileRecheck();
     await get().loadCoats();
   },
 
@@ -82,6 +92,7 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
         .map((coat, index) => ({ ...coat, seq: index + 1, updatedAt: Date.now() }));
       if (rest.length > 0) await db.coats.bulkPut(rest);
     }
+    await reconcileRecheck();
     await get().loadCoats();
   },
 
@@ -92,6 +103,7 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
       .coats.filter((coat) => ids.includes(coat.id))
       .map((coat) => ({ ...coat, ...patch, updatedAt: now }));
     await db.coats.bulkPut(rows);
+    await reconcileRecheck();
     await get().loadCoats();
   },
 
@@ -101,14 +113,6 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     const next = nextCoatState(coat.state);
     if (next === coat.state) return;
     await get().updateCoat(id, { state: next });
-  },
-
-  async markRecheck(bodyId, recheck) {
-    const affected = get().coats.filter((coat) => coat.bodyId === bodyId && coat.state !== 'done');
-    if (affected.length === 0) return;
-    const now = Date.now();
-    await db.coats.bulkPut(affected.map((coat) => ({ ...coat, needRecheck: recheck, updatedAt: now })));
-    await get().loadCoats();
   },
 
   async reorderCoats(bodyId, orderedIds) {

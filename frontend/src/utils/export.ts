@@ -96,9 +96,17 @@ export function exportReworkList(
   return filename;
 }
 
+/** 取荫房记录的简短溯源文案（日期 · 判定 · 记录人） */
+function roomTrace(rooms: Room[], id: string | null): string {
+  if (!id) return '';
+  const room = rooms.find((item) => item.id === id);
+  if (!room) return '记录已撤销';
+  return `${room.date} ${ROOM_VERDICT_LABEL[room.verdict]}${room.operator ? ` ${room.operator}` : ''}`;
+}
+
 /** 工序台账 CSV（全部胎体 + 道次 + 荫房） */
 export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): string {
-  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '荫房日期', '温度(℃)', '湿度(%)', '判定'];
+  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '挂起记录', '松绑记录', '荫房日期', '温度(℃)', '湿度(%)', '判定', '记录人'];
   const lines: string[] = [header.map(csvCell).join(',')];
   bodies.forEach((body) => {
     const bodyCoats = coats.filter((item) => item.bodyId === body.id).sort((a, b) => a.seq - b.seq);
@@ -121,10 +129,13 @@ export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): s
           coat ? coat.thicknessUm : '',
           coat ? COAT_STATE_LABEL[coat.state] : '',
           coat ? (coat.needRecheck ? '是' : '否') : '',
+          coat ? roomTrace(rooms, coat.suspendedByRoomId) : '',
+          coat ? roomTrace(rooms, coat.releasedByRoomId) : '',
           room ? room.date : '',
           room ? room.tempC : '',
           room ? room.humidityPct : '',
           room ? ROOM_VERDICT_LABEL[room.verdict] : '',
+          room ? room.operator : '',
         ]
           .map(csvCell)
           .join(','),

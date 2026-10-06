@@ -22,6 +22,8 @@ export interface Room {
   outAt: string;
   /** 判定结论 */
   verdict: RoomVerdict;
+  /** 记录人：越界记录由其挂起道次，适宜记录由其松绑，用于挂起/松绑溯源 */
+  operator: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -56,5 +58,6 @@ export function createEmptyRoomDraft(bodyId: string): RoomDraft {
     inAt: '09:00',
     outAt: '21:00',
     verdict: 'suitable',
+    operator: '',
   };
 }
