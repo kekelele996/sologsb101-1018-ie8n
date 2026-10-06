@@ -181,7 +181,7 @@ export default function BodyList() {
           <Row gutter={[16, 16]}>
             {filtered.map((body) => {
               const stat = progressOf(body.id);
-              const recheck = coats.some((coat) => coat.bodyId === body.id && coat.needRecheck);
+              const recheckCount = coats.filter((coat) => coat.bodyId === body.id && coat.needRecheck).length;
               return (
                 <Col key={body.id} xs={24} md={12} xl={8}>
                   <Card
@@ -189,7 +189,13 @@ export default function BodyList() {
                     title={
                       <Space size={6} wrap>
                         <Tag color="#8c2f1f">{body.code}</Tag>
-                        <StageTag state={body.state} needRecheck={recheck} />
+                        <StageTag
+                          state={body.state}
+                          needRecheck={recheckCount > 0}
+                          recheckNote={
+                            recheckCount > 0 ? `${recheckCount} 道待复检，由荫房越界记录挂起，详见道次页` : undefined
+                          }
+                        />
                       </Space>
                     }
                     extra={

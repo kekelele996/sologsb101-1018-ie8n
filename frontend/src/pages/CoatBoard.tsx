@@ -1,7 +1,8 @@
 /**
  * /coats 髹涂道次编排
  * 拖拽调整道次先后、批量改漆种与状态、同器型自动带出上次漆种与间隔建议。
- * 消费 Coat、Body；复用 <StageTag>、<FilterBar>、<StatBadge>、<EmptyPanel>。
+ * 待复检由荫房档案驱动：越界记录挂起、适宜记录配对松下，页上只读展示来去。
+ * 消费 Coat、Body、Room；复用 <StageTag>、<FilterBar>、<StatBadge>、<EmptyPanel>。
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -36,6 +37,7 @@ import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useRoomStore } from '@/stores/roomStore';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
@@ -49,6 +51,8 @@ import {
   type PaintType,
 } from '@/types/coat';
 import { BODY_SHAPE_LABEL } from '@/types/body';
+import { ROOM_VERDICT_LABEL } from '@/types/room';
+import { recheckHangNote } from '@/utils/recheck';
 import { suggestIntervalHours } from '@/utils/humidity';
 
 const FILTER_KEYS = ['paintType', 'state'] as const;
@@ -66,6 +70,7 @@ export default function CoatBoard() {
   const currentBodyId = useBodyStore((state) => state.currentBodyId);
   const setCurrentBodyId = useBodyStore((state) => state.setCurrentBodyId);
   const coats = useCoatStore((state) => state.coats);
+  const rooms = useRoomStore((state) => state.rooms);
   const createCoat = useCoatStore((state) => state.createCoat);
   const updateCoat = useCoatStore((state) => state.updateCoat);
   const removeCoat = useCoatStore((state) => state.removeCoat);
@@ -139,9 +144,23 @@ export default function CoatBoard() {
       coatDate: coat.coatDate,
       thicknessUm: coat.thicknessUm,
       state: coat.state,
-      needRecheck: coat.needRecheck,
     });
     setOpen(true);
+  };
+
+  /** 编辑弹窗里的待复检来去说明：挂起 / 松下都能回溯到具体荫房记录 */
+  const recheckTextOf = (coat: Coat): string => {
+    if (coat.needRecheck) {
+      const room = rooms.find((item) => item.id === coat.recheckByRoomId);
+      return room
+        ? `待复检：由 ${room.date} ${ROOM_VERDICT_LABEL[room.verdict]}记录挂起；环境转好后登记适宜记录，将按登记先后一条对一条配对松下。`
+        : '待复检：挂起它的荫房记录已不在档案中。';
+    }
+    if (coat.recheckReleasedByRoomId) {
+      const room = rooms.find((item) => item.id === coat.recheckReleasedByRoomId);
+      if (room) return `当前无需复检：最近由 ${room.date} 适宜记录松下。`;
+    }
+    return '当前无待复检标记；待复检由荫房越界记录自动挂起，由适宜记录配对松下。';
   };
 
   const submit = async (): Promise<void> => {
@@ -215,7 +234,12 @@ export default function CoatBoard() {
       width: 90,
       sorter: (a, b) => a.seq - b.seq,
       render: (seq: number, record) => (
-        <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
+        <StageTag
+          state={record.state}
+          seq={seq}
+          needRecheck={record.needRecheck}
+          recheckNote={recheckHangNote(record, rooms)}
+        />
       ),
     },
     { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
@@ -443,14 +467,13 @@ export default function CoatBoard() {
               <Select options={[...COAT_STATE_OPTIONS]} />
             </Form.Item>
           </Space>
-          <Form.Item name="needRecheck" label="待复检">
-            <Select
-              options={[
-                { value: false, label: '正常' },
-                { value: true, label: '待复检（荫房异常）' },
-              ]}
+          {editing ? (
+            <Alert
+              type={editing.needRecheck ? 'warning' : 'info'}
+              showIcon
+              message={recheckTextOf(editing)}
             />
-          </Form.Item>
+          ) : null}
           <Alert
             type="warning"
             showIcon

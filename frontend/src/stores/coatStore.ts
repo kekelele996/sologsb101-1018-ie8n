@@ -1,11 +1,13 @@
 /**
  * 髹涂道次状态管理（Zustand）
  * 维护道次顺序与状态推进，支持拖拽重排落库重编号、批量改漆种与状态。
+ * 待复检标记由荫房档案回放派生（见 utils/recheck.ts），此处只负责落库。
  */
 import { create } from 'zustand';
 import { db, createId } from '@/utils/db';
 import type { Coat, CoatDraft, CoatState, PaintType } from '@/types/coat';
 import { nextCoatState } from '@/types/coat';
+import { EMPTY_RECHECK_MARK, type RecheckMark } from '@/utils/recheck';
 import { suggestIntervalHours, suggestPaintType } from '@/utils/humidity';
 import { useBodyStore } from './bodyStore';
 
@@ -14,6 +16,12 @@ export interface PaintSuggestion {
   intervalHours: number;
   sourceCode: string;
   sourceColor: string;
+}
+
+/** 道次完成即闭环：进入已完成态时不携带待复检来去 */
+function withStatePatch(patch: Partial<Coat>): Partial<Coat> {
+  if (patch.state !== 'done') return patch;
+  return { needRecheck: false, recheckByRoomId: null, recheckReleasedByRoomId: null, ...patch };
 }
 
 interface CoatStoreState {
@@ -28,7 +36,8 @@ interface CoatStoreState {
   removeCoat: (id: string) => Promise<void>;
   batchUpdate: (ids: string[], patch: Partial<Coat>) => Promise<void>;
   advanceState: (id: string) => Promise<void>;
-  markRecheck: (bodyId: string, recheck: boolean) => Promise<void>;
+  /** 应用荫房档案回放推导出的待复检来去（仅落库有变化的道次） */
+  applyRecheckMarks: (bodyId: string, marks: Record<string, RecheckMark>) => Promise<void>;
   reorderCoats: (bodyId: string, orderedIds: string[]) => Promise<void>;
   nextSeq: (bodyId: string) => number;
   /** 同器型自动带出上次漆种与间隔建议 */
@@ -60,14 +69,22 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
 
   async createCoat(draft) {
     const now = Date.now();
-    const row: Coat = { ...draft, id: createId('coat'), createdAt: now, updatedAt: now };
+    const row: Coat = {
+      ...draft,
+      needRecheck: draft.needRecheck ?? false,
+      recheckByRoomId: draft.recheckByRoomId ?? null,
+      recheckReleasedByRoomId: draft.recheckReleasedByRoomId ?? null,
+      id: createId('coat'),
+      createdAt: now,
+      updatedAt: now,
+    };
     await db.coats.put(row);
     await get().loadCoats();
     return row;
   },
 
   async updateCoat(id, patch) {
-    await db.coats.update(id, { ...patch, updatedAt: Date.now() } as never);
+    await db.coats.update(id, { ...withStatePatch(patch), updatedAt: Date.now() } as never);
     await get().loadCoats();
   },
 
@@ -88,9 +105,10 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
   async batchUpdate(ids, patch) {
     if (ids.length === 0) return;
     const now = Date.now();
+    const merged = withStatePatch(patch);
     const rows = get()
       .coats.filter((coat) => ids.includes(coat.id))
-      .map((coat) => ({ ...coat, ...patch, updatedAt: now }));
+      .map((coat) => ({ ...coat, ...merged, updatedAt: now }));
     await db.coats.bulkPut(rows);
     await get().loadCoats();
   },
@@ -103,11 +121,23 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     await get().updateCoat(id, { state: next });
   },
 
-  async markRecheck(bodyId, recheck) {
-    const affected = get().coats.filter((coat) => coat.bodyId === bodyId && coat.state !== 'done');
-    if (affected.length === 0) return;
+  async applyRecheckMarks(bodyId, marks) {
     const now = Date.now();
-    await db.coats.bulkPut(affected.map((coat) => ({ ...coat, needRecheck: recheck, updatedAt: now })));
+    const coats = await db.coats.where('bodyId').equals(bodyId).toArray();
+    const rows = coats
+      .map((coat) => {
+        const mark = marks[coat.id] ?? EMPTY_RECHECK_MARK;
+        if (
+          coat.needRecheck === mark.needRecheck &&
+          (coat.recheckByRoomId ?? null) === mark.recheckByRoomId &&
+          (coat.recheckReleasedByRoomId ?? null) === mark.recheckReleasedByRoomId
+        ) {
+          return null;
+        }
+        return { ...coat, ...mark, updatedAt: now };
+      })
+      .filter((row): row is Coat => row !== null);
+    if (rows.length > 0) await db.coats.bulkPut(rows);
     await get().loadCoats();
   },
 

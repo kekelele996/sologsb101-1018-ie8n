@@ -1,7 +1,7 @@
 /**
  * /polish 打磨与推光工序录入
  * 按道次生成目数序列，未打磨完的道次禁止进入下一道罩漆。
- * 消费 Polish、Coat；复用 <StageTag>、<StatBadge>、<EmptyPanel>。
+ * 消费 Polish、Coat、Room；复用 <StageTag>、<StatBadge>、<EmptyPanel>。
  */
 import { useMemo, useState } from 'react';
 import {
@@ -30,6 +30,8 @@ import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useIdbTable } from '@/hooks/useIdbTable';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useRoomStore } from '@/stores/roomStore';
+import { recheckHangNote } from '@/utils/recheck';
 import {
   GRIT_SEQUENCE,
   POLISH_METHOD_COLOR,
@@ -53,6 +55,7 @@ export default function PolishBoard() {
   const setCurrentBodyId = useBodyStore((state) => state.setCurrentBodyId);
   const coats = useCoatStore((state) => state.coats);
   const updateCoat = useCoatStore((state) => state.updateCoat);
+  const rooms = useRoomStore((state) => state.rooms);
   const { progressOf } = useCoatProgress();
 
   const [open, setOpen] = useState(false);
@@ -146,14 +149,19 @@ export default function PolishBoard() {
     message.success(`已按 ${targets.length} 个道次生成目数序列（${GRIT_SEQUENCE.slice(0, targets.length).join(' / ')}）`);
   };
 
-  /** 打磨完成后把道次推进到已完成 */
+  /** 打磨完成后把道次推进到已完成：完成态闭环，不再携带待复检来去 */
   const finishPolish = async (row: Polish): Promise<void> => {
     const coat = bodyCoats.find((item) => item.seq === row.seq);
     if (!coat) {
       message.warning('未找到对应道次');
       return;
     }
-    await updateCoat(coat.id, { state: 'done', needRecheck: false });
+    await updateCoat(coat.id, {
+      state: 'done',
+      needRecheck: false,
+      recheckByRoomId: null,
+      recheckReleasedByRoomId: null,
+    });
     message.success(`第 ${row.seq} 道打磨完成，道次已置为已完成`);
   };
 
@@ -164,7 +172,11 @@ export default function PolishBoard() {
       width: 120,
       render: (seq: number) => {
         const coat = bodyCoats.find((item) => item.seq === seq);
-        return coat ? <StageTag state={coat.state} seq={seq} needRecheck={coat.needRecheck} /> : `第 ${seq} 道`;
+        return coat ? (
+          <StageTag state={coat.state} seq={seq} needRecheck={coat.needRecheck} recheckNote={recheckHangNote(coat, rooms)} />
+        ) : (
+          `第 ${seq} 道`
+        );
       },
     },
     { title: '磨料目数', dataIndex: 'grit', width: 110, render: (value: number) => <Tag color="gold">{value} 目</Tag> },

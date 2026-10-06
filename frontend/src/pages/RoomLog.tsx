@@ -1,6 +1,7 @@
 /**
  * /rooms 荫房温湿度记录
- * 按区间判定适宜度并回写关联道次为「待复检」，支持日期区间与判定筛选（同步 URL query）。
+ * 按区间判定适宜度；越界记录挂起该胎体未完成道次为「待复检」并记下自己，
+ * 适宜记录按登记先后一条对一条配对松下，撤销记录即按剩余档案回放复原。
  * 消费 Room、Coat；复用 <FilterBar>、<StatBadge>、<EmptyPanel>。
  */
 import { useMemo, useState } from 'react';
@@ -20,7 +21,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import EmptyPanel from '@/components/common/EmptyPanel';
 import FilterBar, { useFilterQuery, type FilterSelectConfig } from '@/components/common/FilterBar';
 import StatBadge from '@/components/common/StatBadge';
@@ -38,6 +39,7 @@ import {
 } from '@/types/room';
 import { BODY_SHAPE_LABEL } from '@/types/body';
 import { dewPoint, dryingAdvice, dryingHours, judgeVerdict, rangeHint, roomStayHours } from '@/utils/humidity';
+import { replayRecheck, type RecheckReplay } from '@/utils/recheck';
 
 const FILTER_KEYS = ['verdict'] as const;
 
@@ -54,7 +56,6 @@ export default function RoomLog() {
   const createRoom = useRoomStore((state) => state.createRoom);
   const updateRoom = useRoomStore((state) => state.updateRoom);
   const removeRoom = useRoomStore((state) => state.removeRoom);
-  const markRecheck = useCoatStore((state) => state.markRecheck);
   const coats = useCoatStore((state) => state.coats);
 
   const url = useFilterQuery(FILTER_KEYS);
@@ -100,6 +101,19 @@ export default function RoomLog() {
     };
   }, [rooms]);
 
+  /** 按胎体回放荫房档案：每条记录的挂起 / 松下与配对，与道次页待复检同源 */
+  const replayByBody = useMemo(() => {
+    const result: Record<string, RecheckReplay> = {};
+    const bodyIds = new Set(rooms.map((room) => room.bodyId));
+    bodyIds.forEach((bodyId) => {
+      result[bodyId] = replayRecheck(
+        rooms.filter((room) => room.bodyId === bodyId),
+        coats.filter((coat) => coat.bodyId === bodyId),
+      );
+    });
+    return result;
+  }, [rooms, coats]);
+
   const openCreate = (): void => {
     const bodyId = bodies[0]?.id ?? '';
     if (!bodyId) {
@@ -127,13 +141,13 @@ export default function RoomLog() {
     const verdict = judgeVerdict(values.tempC, values.humidityPct);
     if (editing) {
       await updateRoom(editing.id, values);
-      message.success(`已更新 ${values.date} 的荫房记录（判定：${ROOM_VERDICT_LABEL[verdict]}）`);
+      message.success(`已更新 ${values.date} 的荫房记录（判定：${ROOM_VERDICT_LABEL[verdict]}），待复检来去已按登记先后重放`);
     } else {
       await createRoom(values);
       if (verdict === 'suitable') {
-        message.success('已记录荫房温湿度，环境适宜');
+        message.success('已记录荫房温湿度，环境适宜；存在未配对越界记录时已按登记先后配对松下');
       } else {
-        message.warning(`判定为${ROOM_VERDICT_LABEL[verdict]}，已回写关联道次为待复检`);
+        message.warning(`判定为${ROOM_VERDICT_LABEL[verdict]}，已挂起该胎体未完成道次为待复检`);
       }
     }
     setOpen(false);
@@ -173,6 +187,39 @@ export default function RoomLog() {
       ),
     },
     {
+      title: '待复检来去',
+      key: 'recheck',
+      width: 230,
+      render: (_value, record) => {
+        const effect = replayByBody[record.bodyId]?.roomEffects[record.id];
+        if (!effect) return <Typography.Text type="secondary">—</Typography.Text>;
+        const pairedRoom = effect.pairedWithRoomId
+          ? rooms.find((room) => room.id === effect.pairedWithRoomId)
+          : undefined;
+        if (record.verdict === 'suitable') {
+          if (effect.releasedCoatIds.length === 0) {
+            return <Typography.Text type="secondary">无待配对越界记录</Typography.Text>;
+          }
+          return (
+            <Space size={4} wrap>
+              <Tag color="#2f6f4f">松下 {effect.releasedCoatIds.length} 道</Tag>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                配对 {pairedRoom ? `${pairedRoom.date} ${ROOM_VERDICT_LABEL[pairedRoom.verdict]}` : '越界记录'}
+              </Typography.Text>
+            </Space>
+          );
+        }
+        return (
+          <Space size={4} wrap>
+            <Tag color={ROOM_VERDICT_COLOR[record.verdict]}>挂起 {effect.hungCoatIds.length} 道</Tag>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {pairedRoom ? `已由 ${pairedRoom.date} 适宜松下` : '待适宜记录配对'}
+            </Typography.Text>
+          </Space>
+        );
+      },
+    },
+    {
       title: '荫干建议',
       key: 'advice',
       render: (_value, record) => (
@@ -185,29 +232,18 @@ export default function RoomLog() {
     {
       title: '操作',
       key: 'action',
-      width: 230,
+      width: 170,
       render: (_value, record) => (
         <Space size={4} wrap>
-          <Button
-            size="small"
-            type="link"
-            icon={<ReloadOutlined />}
-            onClick={() =>
-              void markRecheck(record.bodyId, record.verdict !== 'suitable').then(() =>
-                message.success(record.verdict === 'suitable' ? '已清除该胎体待复检标记' : '已回写待复检'),
-              )
-            }
-          >
-            回写道次
-          </Button>
           <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
             编辑
           </Button>
           <Popconfirm
             title="删除该荫房记录"
+            description="被它挂起的道次将回到没被它动过的样子。"
             okText="确认"
             cancelText="取消"
-            onConfirm={() => void removeRoom(record.id).then(() => message.success('已删除'))}
+            onConfirm={() => void removeRoom(record.id).then(() => message.success('已删除，被它挂起的道次已复原'))}
           >
             <Button size="small" type="link" danger icon={<DeleteOutlined />}>
               删除
@@ -225,7 +261,10 @@ export default function RoomLog() {
       <div className="gb-page-head">
         <div>
           <h2>荫房温湿度记录</h2>
-          <p>{rangeHint()}；越界判定会回写关联道次为「待复检」，作为漆层缺陷回溯依据。</p>
+          <p>
+            {rangeHint()}；越界记录挂起该胎体未完成道次并记下自己，适宜记录按登记先后一条对一条配对松下，
+            撤销记录即按剩余档案回放复原。
+          </p>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
           新增记录
@@ -280,7 +319,7 @@ export default function RoomLog() {
             title={rooms.length === 0 ? '还没有荫房记录' : '当前条件下没有记录'}
             description={
               rooms.length === 0
-                ? '每次入荫房时登记温度、湿度与出入房时间，判定结果会自动回写道次。'
+                ? '每次入荫房时登记温度、湿度与出入房时间，越界记录自动挂起道次，适宜记录按登记先后配对松下。'
                 : '试着调整判定或日期区间。'
             }
             actionText="新增记录"

@@ -15,6 +15,8 @@ export interface StageTagProps {
   state: StageKey;
   /** 是否需要复检（荫房温湿度越界后回写） */
   needRecheck?: boolean;
+  /** 待复检悬浮说明：哪条荫房记录挂起的 */
+  recheckNote?: string;
   /** 道次序号，传入时前缀显示「第 n 道」 */
   seq?: number;
   /** 追加文案，如「已完成 2/4」 */
@@ -24,7 +26,7 @@ export interface StageTagProps {
 const LABEL: Record<string, string> = { ...BODY_STATE_LABEL, ...COAT_STATE_LABEL };
 const COLOR: Record<string, string> = { ...BODY_STATE_COLOR, ...COAT_STATE_COLOR };
 
-export function StageTag({ state, needRecheck = false, seq, suffix }: StageTagProps) {
+export function StageTag({ state, needRecheck = false, recheckNote, seq, suffix }: StageTagProps) {
   const label = LABEL[state] ?? state;
   const color = COLOR[state] ?? '#8c8c8c';
   const text = `${seq === undefined ? '' : `第 ${seq} 道 · `}${label}${suffix ? ` · ${suffix}` : ''}`;
@@ -35,7 +37,7 @@ export function StageTag({ state, needRecheck = false, seq, suffix }: StageTagPr
         {text}
       </Tag>
       {needRecheck ? (
-        <Tooltip title="关联荫房温湿度越界，需复检漆层">
+        <Tooltip title={recheckNote ?? '关联荫房温湿度越界，需复检漆层'}>
           <Tag icon={<ExclamationCircleOutlined />} color="warning">
             待复检
           </Tag>
